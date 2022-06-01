@@ -13,7 +13,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-    - run: sudo apt-get install libevent-dev asciidoc libzstd-dev zlib1g-dev
+    - run: sudo apt-get update
+    - run: sudo apt-get install --fix-missing libevent-dev asciidoc libzstd-dev zlib1g-dev
     - run: ./autogen.sh
     - name: configure
       run: ./configure
