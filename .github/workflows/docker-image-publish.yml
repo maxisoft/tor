@@ -99,7 +99,7 @@ jobs:
             docker cp dummy_arm64:/usr/bin/tor tor_linux_arm64
     
     - name: Create artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       if: always()
       with:
         name: tor_linux_hop${{ matrix.routelen }}
