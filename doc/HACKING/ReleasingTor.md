@@ -53,6 +53,12 @@ been merged upstream.
       (Version bumps apply to `maint`; anything touching the changelog should
       apply only to `main` or `release`.)
 
+      When updating the version, it will be on `maint` branches and so to
+      merge-forward, use `git merge -s ours`. For instance, if merging the
+      version change of `maint-0.4.5` into `maint-0.4.6`, do on `maint-0.4.6`
+      this command: `git merge -s ours maint-0.4.5`. And then you can proceed
+      with a git-merge-forward.
+
    2. For the ChangeLog and ReleaseNotes, you need to write a blurb at the top
       explaining a bit the release.
 
@@ -120,13 +126,16 @@ do the following:
    2. Merge upstream the artifacts from the `patches` job in the
       `Post-process` stage of the CI release pipeline.
 
+      Like step (2.1) above, the `-dev` version bump need to be done manually
+      with a `git merge -s ours`.
+
    3. Write and post the release announcement for the `forum.torproject.net`
       in the `News -> Tor Release Announcement` category.
 
       If possible, mention in which Tor Browser version (with dates) the
       release will be in. This usually only applies to the latest stable.
 
-   4. Inform `tor-talk@lists.torproject.org` with the releasing pointing to
+   4. Inform `tor-announce@lists.torproject.org` with the releasing pointing to
       the Forum. Append the ChangeLog there. We do this until we can automate
       such post from the forum directly.
 
