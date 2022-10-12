@@ -42,16 +42,19 @@
 #define CC_ALG_DFLT_ALWAYS (CC_ALG_VEGAS)
 
 #define CWND_INC_DFLT (TLS_RECORD_MAX_CELLS)
-#define CWND_INC_PCT_SS_DFLT (50)
+#define CWND_INC_PCT_SS_DFLT (100)
 #define CWND_INC_RATE_DFLT (1)
 
-#define CWND_MIN_DFLT (SENDME_INC_DFLT)
+#define CWND_MIN_DFLT (2*SENDME_INC_DFLT)
 #define CWND_MAX_DFLT (INT32_MAX)
 
 #define BWE_SENDME_MIN_DFLT (5)
 
 #define N_EWMA_CWND_PCT_DFLT (50)
 #define N_EWMA_MAX_DFLT (10)
+#define N_EWMA_SS_DFLT (2)
+
+#define RTT_RESET_PCT_DFLT (100)
 
 /* BDP algorithms for each congestion control algorithms use the piecewise
  * estimattor. See section 3.1.4 of proposal 324. */
@@ -108,9 +111,20 @@ static uint8_t n_ewma_cwnd_pct;
 static uint8_t n_ewma_max;
 
 /**
+ * Maximum number N for the N-count EWMA averaging of RTT in Slow Start.
+ */
+static uint8_t n_ewma_ss;
+
+/**
  * Minimum number of sendmes before we begin BDP estimates
  */
 static uint8_t bwe_sendme_min;
+
+/**
+ * Percentage of the current RTT to use when reseting the minimum RTT
+ * for a circuit. (RTT is reset when the cwnd hits cwnd_min).
+ */
+static uint8_t rtt_reset_pct;
 
 /**
  * Update global congestion control related consensus parameter values,
@@ -157,6 +171,14 @@ congestion_control_new_consensus_params(const networkstatus_t *ns)
         CWND_MAX_MIN,
         CWND_MAX_MAX);
 
+#define RTT_RESET_PCT_MIN (0)
+#define RTT_RESET_PCT_MAX (100)
+  rtt_reset_pct =
+    networkstatus_get_param(NULL, "cc_rtt_reset_pct",
+        RTT_RESET_PCT_DFLT,
+        RTT_RESET_PCT_MIN,
+        RTT_RESET_PCT_MAX);
+
 #define SENDME_INC_MIN 1
 #define SENDME_INC_MAX (255)
   cc_sendme_inc =
@@ -196,6 +218,14 @@ congestion_control_new_consensus_params(const networkstatus_t *ns)
         N_EWMA_MAX_DFLT,
         N_EWMA_MAX_MIN,
         N_EWMA_MAX_MAX);
+
+#define N_EWMA_SS_MIN 2
+#define N_EWMA_SS_MAX (INT32_MAX)
+  n_ewma_ss =
+    networkstatus_get_param(NULL, "cc_ewma_ss",
+        N_EWMA_SS_DFLT,
+        N_EWMA_SS_MIN,
+        N_EWMA_SS_MAX);
 }
 
 /**
@@ -452,8 +482,18 @@ dequeue_timestamp(smartlist_t *timestamps_u64_usecs)
 static inline uint64_t
 n_ewma_count(const congestion_control_t *cc)
 {
-  uint64_t ewma_cnt = MIN(CWND_UPDATE_RATE(cc)*n_ewma_cwnd_pct/100,
+  uint64_t ewma_cnt = 0;
+
+  if (cc->in_slow_start) {
+    /* In slow-start, we check the Vegas condition every sendme,
+     * so much lower ewma counts are needed. */
+    ewma_cnt = n_ewma_ss;
+  } else {
+    /* After slow-start, we check the Vegas condition only once per
+     * CWND, so it is better to average over longer periods. */
+    ewma_cnt = MIN(CWND_UPDATE_RATE(cc)*n_ewma_cwnd_pct/100,
                           n_ewma_max);
+  }
   ewma_cnt = MAX(ewma_cnt, 2);
   return ewma_cnt;
 }
@@ -695,10 +735,9 @@ congestion_control_update_circuit_estimates(congestion_control_t *cc,
 static bool
 time_delta_should_use_heuristics(const congestion_control_t *cc)
 {
-
-  /* If we have exited slow start, we should have processed at least
-   * a cwnd worth of RTTs */
-  if (!cc->in_slow_start) {
+  /* If we have exited slow start and also have an EWMA RTT, we
+   * should have processed at least a cwnd worth of RTTs */
+  if (!cc->in_slow_start && cc->ewma_rtt_usec) {
     return true;
   }
 
@@ -735,34 +774,27 @@ time_delta_stalled_or_jumped(const congestion_control_t *cc,
     log_fn_ratelim(&stall_info_limit, LOG_INFO, LD_CIRC,
            "Congestion control cannot measure RTT due to monotime stall.");
 
-    /* If delta is every 0, the monotime clock has stalled, and we should
-     * not use it anywhere. */
     is_monotime_clock_broken = true;
-
-    return is_monotime_clock_broken;
-  }
-
-  /* If the old_delta is 0, we have no previous values on this circuit.
-   *
-   * So, return the global monotime status from other circuits, and
-   * do not update.
-   */
-  if (old_delta == 0) {
-    return is_monotime_clock_broken;
+    return true;
   }
 
   /*
    * For the heuristic cases, we need at least a few timestamps,
    * to average out any previous partial stalls or jumps. So until
-   * than point, let's just use the cached status from other circuits.
+   * that point, let's just assume its OK.
    */
   if (!time_delta_should_use_heuristics(cc)) {
-    return is_monotime_clock_broken;
+    return false;
   }
 
   /* If old_delta is significantly larger than new_delta, then
-   * this means that the monotime clock recently stopped moving
-   * forward. */
+   * this means that the monotime clock could have recently
+   * stopped moving forward. However, use the cache for this
+   * value, because it may also be caused by network activity,
+   * or by a previous clock jump that was not detected.
+   *
+   * So if we have not gotten a 0-delta recently, we will
+   * still allow this new low RTT, but just yell about it. */
   if (old_delta > new_delta * DELTA_DISCREPENCY_RATIO_MAX) {
     static ratelim_t dec_notice_limit = RATELIM_INIT(300);
     log_fn_ratelim(&dec_notice_limit, LOG_NOTICE, LD_CIRC,
@@ -770,29 +802,28 @@ time_delta_stalled_or_jumped(const congestion_control_t *cc,
            "), likely due to clock jump.",
            new_delta/1000, old_delta/1000);
 
-    is_monotime_clock_broken = true;
-
     return is_monotime_clock_broken;
   }
 
   /* If new_delta is significantly larger than old_delta, then
-   * this means that the monotime clock suddenly jumped forward. */
+   * this means that the monotime clock suddenly jumped forward.
+   * However, do not cache this value, because it may also be caused
+   * by network activity.
+   */
   if (new_delta > old_delta * DELTA_DISCREPENCY_RATIO_MAX) {
     static ratelim_t dec_notice_limit = RATELIM_INIT(300);
-    log_fn_ratelim(&dec_notice_limit, LOG_NOTICE, LD_CIRC,
+    log_fn_ratelim(&dec_notice_limit, LOG_PROTOCOL_WARN, LD_CIRC,
            "Sudden increase in circuit RTT (%"PRIu64" vs %"PRIu64
-           "), likely due to clock jump.",
+           "), likely due to clock jump or suspended remote endpoint.",
            new_delta/1000, old_delta/1000);
 
-    is_monotime_clock_broken = true;
-
-    return is_monotime_clock_broken;
+    return true;
   }
 
   /* All good! Update cached status, too */
   is_monotime_clock_broken = false;
 
-  return is_monotime_clock_broken;
+  return false;
 }
 
 /**
@@ -842,8 +873,25 @@ congestion_control_update_circuit_rtt(congestion_control_t *cc,
     cc->max_rtt_usec = rtt;
   }
 
-  if (cc->min_rtt_usec == 0 || rtt < cc->min_rtt_usec) {
-    cc->min_rtt_usec = rtt;
+  if (cc->min_rtt_usec == 0) {
+    // If we do not have a min_rtt yet, use current ewma
+    cc->min_rtt_usec = cc->ewma_rtt_usec;
+  } else if (cc->cwnd == cc->cwnd_min) {
+    // Raise min rtt if cwnd hit cwnd_min. This gets us out of a wedge state
+    // if we hit cwnd_min due to an abnormally low rtt.
+    uint64_t new_rtt = percent_max_mix(cc->ewma_rtt_usec, cc->min_rtt_usec,
+                                       rtt_reset_pct);
+
+    static ratelim_t rtt_notice_limit = RATELIM_INIT(300);
+    log_fn_ratelim(&rtt_notice_limit, LOG_NOTICE, LD_CIRC,
+            "Resetting circ RTT from %"PRIu64" to %"PRIu64" due to low cwnd",
+            cc->min_rtt_usec/1000, new_rtt/1000);
+
+    cc->min_rtt_usec = new_rtt;
+  } else if (cc->ewma_rtt_usec < cc->min_rtt_usec) {
+    // Using the EWMA for min instead of current RTT helps average out
+    // effects from other conns
+    cc->min_rtt_usec = cc->ewma_rtt_usec;
   }
 
   return rtt;
@@ -891,10 +939,19 @@ congestion_control_update_circuit_bdp(congestion_control_t *cc,
   if (!cc->ewma_rtt_usec) {
      uint64_t cwnd = cc->cwnd;
 
+     tor_assert_nonfatal(cc->cwnd <= cwnd_max);
+
      /* If the channel is blocked, keep subtracting off the chan_q
       * until we hit the min cwnd. */
      if (blocked_on_chan) {
-       cwnd = MAX(cwnd - chan_q, cc->cwnd_min);
+       /* Cast is fine because we're less than int32 */
+       if (chan_q >= (int64_t)cwnd) {
+         log_notice(LD_CIRC,
+                    "Clock stall with large chanq: %d %"PRIu64, chan_q, cwnd);
+         cwnd = cc->cwnd_min;
+       } else {
+         cwnd = MAX(cwnd - chan_q, cc->cwnd_min);
+       }
        cc->blocked_chan = 1;
      } else {
        cc->blocked_chan = 0;

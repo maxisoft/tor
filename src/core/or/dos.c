@@ -534,7 +534,7 @@ conn_update_on_close(conn_client_stats_t *stats, const tor_addr_t *addr)
 {
   /* Extra super duper safety. Going below 0 means an underflow which could
    * lead to most likely a false positive. In theory, this should never happen
-   * but lets be extra safe. */
+   * but let's be extra safe. */
   if (BUG(stats->concurrent_count == 0)) {
     return;
   }
@@ -607,7 +607,7 @@ dos_cc_new_create_cell(channel_t *chan)
   /* This is the detection. Assess at every CREATE cell if the client should
    * get marked as malicious. This should be kept as fast as possible. */
   if (cc_has_exhausted_circuits(&entry->dos_stats)) {
-    /* If this is the first time we mark this entry, log it a info level.
+    /* If this is the first time we mark this entry, log it.
      * Under heavy DDoS, logging each time we mark would results in lots and
      * lots of logs. */
     if (entry->dos_stats.cc_stats.marked_until_ts == 0) {
