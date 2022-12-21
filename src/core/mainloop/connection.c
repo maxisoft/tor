@@ -2233,6 +2233,13 @@ connection_connect_sockaddr,(connection_t *conn,
              tor_socket_strerror(errno));
   }
 
+  /* From ip(7): Inform the kernel to not reserve an ephemeral port when using
+   * bind(2) with a port number of 0. The port will later be automatically
+   * chosen at connect(2) time, in a way that allows sharing a source port as
+   * long as the 4-tuple is unique.
+   *
+   * This is needed for relays using OutboundBindAddresses because the port
+   * value in the bind address is set to 0. */
 #ifdef IP_BIND_ADDRESS_NO_PORT
   static int try_ip_bind_address_no_port = 1;
   if (bindaddr && try_ip_bind_address_no_port &&
