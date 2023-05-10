@@ -1,4 +1,4 @@
-FROM alpine:3.16 as builder
+FROM alpine:3.18 as builder
 ARG DEFAULT_ROUTE_LEN=2
 ARG CFLAGS="-Ofast -finline-functions -funroll-loops"
 ENV DEFAULT_ROUTE_LEN=${DEFAULT_ROUTE_LEN} CFLAGS="${CFLAGS}"
@@ -22,7 +22,7 @@ cd .. && \
 rm -rf /usr/src/tor
 #COPY ./ /usr/src/tor
 
-FROM alpine:3.16
+FROM alpine:3.18
 ARG DEFAULT_ROUTE_LEN=2
 LABEL maintainer="github.com/maxisoft" tor_route_len=${DEFAULT_ROUTE_LEN} name="tor custom build" url="https://github.com/maxisoft/tor" vcs-url="https://github.com/maxisoft/tor" org.opencontainers.image.source="https://github.com/maxisoft/tor"
 RUN apk add --no-cache tor
