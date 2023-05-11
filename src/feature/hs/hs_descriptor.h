@@ -15,6 +15,7 @@
 #include "trunnel/ed25519_cert.h" /* needed for trunnel */
 #include "feature/nodelist/torcert.h"
 #include "core/crypto/hs_ntor.h" /* for hs_subcredential_t */
+#include "feature/hs/hs_pow.h"
 
 /* Trunnel */
 struct link_specifier_t;
@@ -170,6 +171,9 @@ typedef struct hs_desc_encrypted_data_t {
   /** Flow control protocol version line. */
   char *flow_control_pv;
   uint8_t sendme_inc;
+
+  /** PoW parameters. If NULL, it is not present. */
+  hs_pow_desc_params_t *pow_params;
 
   /** A list of intro points. Contains hs_desc_intro_point_t objects. */
   smartlist_t *intro_points;

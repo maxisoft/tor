@@ -88,9 +88,11 @@
 #include "feature/control/control.h"
 #include "feature/control/control_auth.h"
 #include "feature/control/control_events.h"
+#include "feature/dircache/dirserv.h"
 #include "feature/dirclient/dirclient_modes.h"
 #include "feature/hibernate/hibernate.h"
 #include "feature/hs/hs_config.h"
+#include "feature/hs/hs_pow.h"
 #include "feature/metrics/metrics.h"
 #include "feature/nodelist/dirlist.h"
 #include "feature/nodelist/networkstatus.h"
@@ -508,6 +510,9 @@ static const config_var_t option_vars_[] = {
       LINELIST_S, RendConfigLines, NULL),
   VAR("HiddenServiceOnionBalanceInstance",
       LINELIST_S, RendConfigLines, NULL),
+  VAR("HiddenServicePoWDefensesEnabled", LINELIST_S, RendConfigLines, NULL),
+  VAR("HiddenServicePoWQueueRate", LINELIST_S, RendConfigLines, NULL),
+  VAR("HiddenServicePoWQueueBurst", LINELIST_S, RendConfigLines, NULL),
   VAR("HiddenServiceStatistics", BOOL, HiddenServiceStatistics_option, "1"),
   V(ClientOnionAuthDir,          FILENAME, NULL),
   OBSOLETE("CloseHSClientCircuitsImmediatelyOnTimeout"),
@@ -2728,11 +2733,19 @@ list_deprecated_options(void)
 static void
 list_enabled_modules(void)
 {
-  printf("%s: %s\n", "relay", have_module_relay() ? "yes" : "no");
-  printf("%s: %s\n", "dirauth", have_module_dirauth() ? "yes" : "no");
-  // We don't list dircache, because it cannot be enabled or disabled
-  // independently from relay.  Listing it here would proliferate
-  // test variants in test_parseconf.sh to no useful purpose.
+  static const struct {
+    const char *name;
+    bool have;
+  } list[] = {
+    { "relay", have_module_relay() },
+    { "dirauth", have_module_dirauth() },
+    { "dircache", have_module_dircache() },
+    { "pow", have_module_pow() }
+  };
+
+  for (unsigned i = 0; i < sizeof list / sizeof list[0]; i++) {
+    printf("%s: %s\n", list[i].name, list[i].have ? "yes" : "no");
+  }
 }
 
 /** Prints compile-time and runtime library versions. */
@@ -4473,6 +4486,10 @@ options_init_from_torrc(int argc, char **argv)
 
   if (config_line_find(cmdline_only_options, "--version")) {
     printf("Tor version %s.\n",get_version());
+#ifdef ENABLE_GPL
+    printf("This build of Tor is covered by the GNU General Public License "
+            "(https://www.gnu.org/licenses/gpl-3.0.en.html)\n");
+#endif
     printf("Tor is running on %s with Libevent %s, "
             "%s %s, Zlib %s, Liblzma %s, Libzstd %s and %s %s as libc.\n",
             get_uname(),
