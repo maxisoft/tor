@@ -27,6 +27,7 @@
 #include "lib/cc/ctassert.h"
 #include "core/mainloop/cpuworker.h"
 #include "lib/evloop/workqueue.h"
+#include "lib/time/compat_time.h"
 
 /** Replay cache set up */
 /** Cache entry for (nonce, seed) replay protection. */
@@ -89,23 +90,6 @@ increment_and_set_nonce(uint8_t *nonce, uint8_t *challenge)
     }
   }
   memcpy(challenge + HS_POW_NONCE_OFFSET, nonce, HS_POW_NONCE_LEN);
-}
-
-/* Helper: Allocate an EquiX context, using the much faster compiled
- * implementation of hashx if it's available on this architecture. */
-static equix_ctx *
-build_equix_ctx(equix_ctx_flags flags)
-{
-  equix_ctx *ctx = equix_alloc(flags | EQUIX_CTX_COMPILE);
-  if (ctx == EQUIX_NOTSUPP) {
-    ctx = equix_alloc(flags);
-  }
-  tor_assert_nonfatal(ctx != EQUIX_NOTSUPP);
-  tor_assert_nonfatal(ctx != NULL);
-  if (ctx == EQUIX_NOTSUPP) {
-    ctx = NULL;
-  }
-  return ctx;
 }
 
 /* Helper: Build EquiX challenge (P || ID || C || N || INT_32(E)) and return
@@ -191,9 +175,24 @@ unpack_equix_solution(const uint8_t *bytes_in,
   }
 }
 
+/** Helper: Map the CompiledProofOfWorkHash configuration option to its
+ * corresponding equix_ctx_flags bit. */
+static equix_ctx_flags
+hs_pow_equix_option_flags(int CompiledProofOfWorkHash)
+{
+  if (CompiledProofOfWorkHash == 0) {
+    return 0;
+  } else if (CompiledProofOfWorkHash == 1) {
+    return EQUIX_CTX_MUST_COMPILE;
+  } else {
+    tor_assert_nonfatal(CompiledProofOfWorkHash == -1);
+    return EQUIX_CTX_TRY_COMPILE;
+  }
+}
+
 /** Solve the EquiX/blake2b PoW scheme using the parameters in pow_params, and
  * store the solution in pow_solution_out. Returns 0 on success and -1
- * otherwise. Called by a client. */
+ * otherwise. Called by a client, from a cpuworker thread. */
 int
 hs_pow_solve(const hs_pow_solver_inputs_t *pow_inputs,
              hs_pow_solution_t *pow_solution_out)
@@ -214,36 +213,85 @@ hs_pow_solve(const hs_pow_solver_inputs_t *pow_inputs,
   challenge = build_equix_challenge(&pow_inputs->service_blinded_id,
                                     pow_inputs->seed, nonce, effort);
 
-  ctx = build_equix_ctx(EQUIX_CTX_SOLVE);
+  /* This runs on a cpuworker, let's not access global get_options().
+   * Instead, the particular options we need are captured in pow_inputs. */
+  ctx = equix_alloc(EQUIX_CTX_SOLVE |
+    hs_pow_equix_option_flags(pow_inputs->CompiledProofOfWorkHash));
   if (!ctx) {
     goto end;
   }
-  equix_solution solutions[EQUIX_MAX_SOLS];
-  uint8_t sol_bytes[HS_POW_EQX_SOL_LEN];
 
+  uint8_t sol_bytes[HS_POW_EQX_SOL_LEN];
+  monotime_t start_time;
+  monotime_get(&start_time);
   log_info(LD_REND, "Solving proof of work (effort %u)", effort);
+
   for (;;) {
     /* Calculate solutions to S = equix_solve(C || N || E),  */
-    int count = equix_solve(ctx, challenge, HS_POW_CHALLENGE_LEN, solutions);
-    for (int i = 0; i < count; i++) {
-      pack_equix_solution(&solutions[i], sol_bytes);
+    equix_solutions_buffer buffer;
+    equix_result result;
+    result = equix_solve(ctx, challenge, HS_POW_CHALLENGE_LEN, &buffer);
+    switch (result) {
 
-      /* Check an Equi-X solution against the effort threshold */
-      if (validate_equix_challenge(challenge, sol_bytes, effort)) {
-        /* Store the nonce N. */
-        memcpy(pow_solution_out->nonce, nonce, HS_POW_NONCE_LEN);
-        /* Store the effort E. */
-        pow_solution_out->effort = effort;
-        /* We only store the first 4 bytes of the seed C. */
-        memcpy(pow_solution_out->seed_head, pow_inputs->seed,
+      case EQUIX_OK:
+        for (unsigned i = 0; i < buffer.count; i++) {
+          pack_equix_solution(&buffer.sols[i], sol_bytes);
+
+          /* Check an Equi-X solution against the effort threshold */
+          if (validate_equix_challenge(challenge, sol_bytes, effort)) {
+            /* Store the nonce N. */
+            memcpy(pow_solution_out->nonce, nonce, HS_POW_NONCE_LEN);
+            /* Store the effort E. */
+            pow_solution_out->effort = effort;
+            /* We only store the first 4 bytes of the seed C. */
+            memcpy(pow_solution_out->seed_head, pow_inputs->seed,
                sizeof(pow_solution_out->seed_head));
-        /* Store the solution S */
-        memcpy(&pow_solution_out->equix_solution, sol_bytes, sizeof sol_bytes);
+            /* Store the solution S */
+            memcpy(&pow_solution_out->equix_solution,
+                   sol_bytes, sizeof sol_bytes);
 
-        /* Indicate success and we are done. */
-        ret = 0;
+            monotime_t end_time;
+            monotime_get(&end_time);
+            int64_t duration_usec = monotime_diff_usec(&start_time, &end_time);
+            log_info(LD_REND, "Proof of work solution (effort %u) found "
+                     "using %s implementation in %u.%06u seconds",
+                     effort,
+                    (EQUIX_SOLVER_DID_USE_COMPILER & buffer.flags)
+                       ? "compiled" : "interpreted",
+                    (unsigned)(duration_usec / 1000000),
+                    (unsigned)(duration_usec % 1000000));
+
+            /* Indicate success and we are done. */
+            ret = 0;
+            goto end;
+          }
+        }
+        break;
+
+      case EQUIX_FAIL_CHALLENGE:
+        /* This happens occasionally due to HashX rejecting some program
+         * configurations. For our purposes here it's the same as count==0.
+         * Increment the nonce and try again. */
+        break;
+
+      case EQUIX_FAIL_COMPILE:
+        /* The interpreter is disabled and the compiler failed */
+        log_warn(LD_REND, "Proof of work solver failed, "
+                 "compile error with no fallback enabled.");
         goto end;
-      }
+
+      /* These failures are not applicable to equix_solve, but included for
+       * completeness and to satisfy exhaustive enum warnings. */
+      case EQUIX_FAIL_ORDER:
+      case EQUIX_FAIL_PARTIAL_SUM:
+      case EQUIX_FAIL_FINAL_SUM:
+      /* And these really should not happen, and indicate
+       * programming errors if they do. */
+      case EQUIX_FAIL_NO_SOLVER:
+      case EQUIX_FAIL_INTERNAL:
+      default:
+        tor_assert_nonfatal_unreached();
+        goto end;
     }
 
     /* No solutions for this nonce and/or none that passed the effort
@@ -309,7 +357,8 @@ hs_pow_verify(const ed25519_public_key_t *service_blinded_id,
     goto done;
   }
 
-  ctx = build_equix_ctx(EQUIX_CTX_VERIFY);
+  ctx = equix_alloc(EQUIX_CTX_VERIFY |
+    hs_pow_equix_option_flags(get_options()->CompiledProofOfWorkHash));
   if (!ctx) {
     goto done;
   }
@@ -398,14 +447,9 @@ pow_worker_threadfn(void *state_, void *work_)
   job->pow_solution_out = tor_malloc_zero(sizeof(hs_pow_solution_t));
 
   if (hs_pow_solve(&job->pow_inputs, job->pow_solution_out)) {
-    log_warn(LD_REND, "Failed to run the proof of work solver");
     tor_free(job->pow_solution_out);
     job->pow_solution_out = NULL; /* how we signal that we came up empty */
-    return WQ_RPL_REPLY;
   }
-
-  /* we have a winner! */
-  log_info(LD_REND, "cpuworker has a proof of work solution");
   return WQ_RPL_REPLY;
 }
 
