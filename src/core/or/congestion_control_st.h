@@ -41,8 +41,8 @@ typedef enum {
    * Prop#324: TOR_NOLA - NOLA looks the BDP right in the eye and uses it
    * immediately as CWND. No slow start, no other congestion signals, no delay,
    * no bullshit. Like TOR_VEGAS, it also uses aggressive BDP estimates, to
-   * avoid out-competition. It seems a bit better throughput than Vegas,
-   * but its agressive BDP and rapid updates may lead to more queue latency. */
+   * avoid out-competition. It seems a bit better throughput than Vegas, but
+   * its aggressive BDP and rapid updates may lead to more queue latency. */
   CC_ALG_NOLA = 3,
 } cc_alg_t;
 
@@ -158,10 +158,17 @@ struct congestion_control_t {
    * It is also reset to 0 immediately whenever the circuit's orconn is
    * blocked, and when a previously blocked orconn is unblocked.
    */
-  uint64_t next_cc_event;
+  uint16_t next_cc_event;
+
+  /** Counts down until we process a cwnd worth of SENDME acks.
+   * Used to track full cwnd status. */
+  uint16_t next_cwnd_event;
 
   /** Are we in slow start? */
   bool in_slow_start;
+
+  /** Has the cwnd become full since last cwnd update? */
+  bool cwnd_full;
 
   /** Is the local channel blocked on us? That's a congestion signal */
   bool blocked_chan;
@@ -224,7 +231,7 @@ static inline uint64_t CWND_UPDATE_RATE(const struct congestion_control_t *cc)
    * of acks */
 
   if (cc->in_slow_start) {
-    return ((cc->cwnd + cc->sendme_inc/2)/cc->sendme_inc);
+    return 1;
   } else {
     return ((cc->cwnd + cc->cwnd_inc_rate*cc->sendme_inc/2)
            / (cc->cwnd_inc_rate*cc->sendme_inc));

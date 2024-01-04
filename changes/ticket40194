@@ -1,3 +1,0 @@
-  o Minor feature (relay, metrics):
-    - Add counters to the MetricsPort how many connections, per type, are
-      currently opened and how many were created. Part of ticket 40194.

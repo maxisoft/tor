@@ -40,6 +40,7 @@
 #include "core/or/or.h"
 #include "app/config/config.h"
 #include "core/mainloop/connection.h"
+#include "core/mainloop/cpuworker.h"
 #include "core/mainloop/mainloop.h"
 #include "core/mainloop/netstatus.h"
 #include "core/or/channel.h"
@@ -50,6 +51,7 @@
 #include "core/or/circuitmux.h"
 #include "core/or/circuitmux_ewma.h"
 #include "core/or/circuitstats.h"
+#include "core/or/conflux_params.h"
 #include "core/or/connection_edge.h"
 #include "core/or/connection_or.h"
 #include "core/or/dos.h"
@@ -83,6 +85,7 @@
 #include "feature/nodelist/routerlist.h"
 #include "feature/nodelist/torcert.h"
 #include "feature/relay/dns.h"
+#include "feature/relay/onion_queue.h"
 #include "feature/relay/routermode.h"
 #include "lib/crypt_ops/crypto_rand.h"
 #include "lib/crypt_ops/crypto_util.h"
@@ -1667,6 +1670,8 @@ notify_before_networkstatus_changes(const networkstatus_t *old_c,
   relay_consensus_has_changed(new_c);
   hs_dos_consensus_has_changed(new_c);
   rep_hist_consensus_has_changed(new_c);
+  cpuworker_consensus_has_changed(new_c);
+  onion_consensus_has_changed(new_c);
 }
 
 /* Called after a new consensus has been put in the global state. It is safe
@@ -1707,6 +1712,7 @@ notify_after_networkstatus_changes(void)
   flow_control_new_consensus_params(c);
   hs_service_new_consensus_params(c);
   dns_new_consensus_params(c);
+  conflux_params_new_consensus(c);
 
   /* Maintenance of our L2 guard list */
   maintain_layer2_guards();

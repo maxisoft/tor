@@ -71,6 +71,7 @@
 
 #include "core/or/edge_connection_st.h"
 #include "core/or/or_circuit_st.h"
+#include "core/or/conflux_util.h"
 
 #include "ht.h"
 
@@ -512,7 +513,7 @@ send_resolved_cell,(edge_connection_t *conn, uint8_t answer_type,
   uint32_t ttl;
 
   buf[0] = answer_type;
-  ttl = clip_dns_ttl(conn->address_ttl);
+  ttl = conn->address_ttl;
 
   switch (answer_type)
     {
@@ -584,7 +585,7 @@ send_resolved_hostname_cell,(edge_connection_t *conn,
   size_t namelen = strlen(hostname);
 
   tor_assert(namelen < 256);
-  ttl = clip_dns_ttl(conn->address_ttl);
+  ttl = conn->address_ttl;
 
   buf[0] = RESOLVED_TYPE_HOSTNAME;
   buf[1] = (uint8_t)namelen;
@@ -650,6 +651,7 @@ dns_resolve(edge_connection_t *exitconn)
          * connected cell. */
         exitconn->next_stream = oncirc->n_streams;
         oncirc->n_streams = exitconn;
+        conflux_update_n_streams(oncirc, exitconn);
       }
       break;
     case 0:
@@ -658,6 +660,7 @@ dns_resolve(edge_connection_t *exitconn)
       exitconn->base_.state = EXIT_CONN_STATE_RESOLVING;
       exitconn->next_stream = oncirc->resolving_streams;
       oncirc->resolving_streams = exitconn;
+      conflux_update_resolving_streams(oncirc, exitconn);
       break;
     case -2:
     case -1:
@@ -1234,6 +1237,7 @@ inform_pending_connections(cached_resolve_t *resolve)
         pend->conn->next_stream = TO_OR_CIRCUIT(circ)->n_streams;
         pend->conn->on_circuit = circ;
         TO_OR_CIRCUIT(circ)->n_streams = pend->conn;
+        conflux_update_n_streams(TO_OR_CIRCUIT(circ), pend->conn);
 
         connection_exit_connect(pend->conn);
       } else {
@@ -1310,7 +1314,7 @@ make_pending_resolve_cached(cached_resolve_t *resolve)
         resolve->ttl_hostname < ttl)
       ttl = resolve->ttl_hostname;
 
-    set_expiry(new_resolve, time(NULL) + clip_dns_ttl(ttl));
+    set_expiry(new_resolve, time(NULL) + ttl);
   }
 
   assert_cache_ok();
@@ -1459,7 +1463,7 @@ configure_libevent_options(void)
    * the query itself timed out in transit. */
   SET("timeout:", get_consensus_param_exit_dns_timeout());
 
-  /* This tells libevent to attemps up to X times a DNS query if the previous
+  /* This tells libevent to attempt up to X times a DNS query if the previous
    * one failed to complete within N second. We believe that this should be
    * enough to catch temporary hiccups on the first query. But after that, it
    * should signal us that it won't be able to resolve it. */
@@ -1725,7 +1729,7 @@ evdns_callback(int result, char type, int count, int ttl, void *addresses,
   }
   if (result != DNS_ERR_SHUTDOWN)
     dns_found_answer(string_address, orig_query_type,
-                     result, &addr, hostname, ttl);
+                     result, &addr, hostname, clip_dns_fuzzy_ttl(ttl));
 
   /* The result can be changed within this function thus why we note the result
    * at the end. */

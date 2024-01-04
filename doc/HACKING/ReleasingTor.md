@@ -76,7 +76,7 @@ Steps are:
 
    1. Run `./build.sh` which will download everything you need, including the
       latest tarballs from the release CI, and auto-commit the signatures if
-      the checksum match. You will need to confim the commits.
+      the checksum match. You will need to confirm the commits.
 
    2. If all is good, `git push origin main` your signatures.
 
@@ -138,6 +138,12 @@ do the following:
    4. Inform `tor-announce@lists.torproject.org` with the releasing pointing to
       the Forum. Append the ChangeLog there. We do this until we can automate
       such post from the forum directly.
+
+   5. Update torproject.org website by submitting a MR to
+      https://gitlab.torproject.org/tpo/web/tpo
+
+      The `databags/versions.ini` file is the one to change with the newly
+      released version(s).
 
 ### New Stable
 

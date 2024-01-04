@@ -243,7 +243,6 @@ router_rebuild_store(int flags, desc_store_t *store)
   int r = -1;
   off_t offset = 0;
   smartlist_t *signed_descriptors = NULL;
-  int nocache=0;
   size_t total_expected_len = 0;
   int had_any;
   int force = flags & RRS_FORCE;
@@ -304,7 +303,6 @@ router_rebuild_store(int flags, desc_store_t *store)
         goto done;
       }
       if (sd->do_not_cache) {
-        ++nocache;
         continue;
       }
       c = tor_malloc(sizeof(sized_chunk_t));
@@ -560,6 +558,7 @@ router_can_choose_node(const node_t *node, int flags)
   const bool direct_conn = (flags & CRN_DIRECT_CONN) != 0;
   const bool rendezvous_v3 = (flags & CRN_RENDEZVOUS_V3) != 0;
   const bool initiate_ipv6_extend = (flags & CRN_INITIATE_IPV6_EXTEND) != 0;
+  const bool need_conflux = (flags & CRN_CONFLUX) != 0;
 
   const or_options_t *options = get_options();
   const bool check_reach =
@@ -594,6 +593,10 @@ router_can_choose_node(const node_t *node, int flags)
   if (rendezvous_v3 &&
       !node_supports_v3_rendezvous_point(node))
     return false;
+  /* Exclude relay that don't do conflux if requested. */
+  if (need_conflux && !node_supports_conflux(node)) {
+    return false;
+  }
   /* Choose a node with an OR address that matches the firewall rules */
   if (direct_conn && check_reach &&
       !reachable_addr_allows_node(node,
@@ -2651,7 +2654,7 @@ update_consensus_router_descriptor_downloads(time_t now, int is_vote,
   digestmap_t *map = NULL;
   smartlist_t *no_longer_old = smartlist_new();
   smartlist_t *downloadable = smartlist_new();
-  routerstatus_t *source = NULL;
+  const routerstatus_t *source = NULL;
   int authdir = authdir_mode(options);
   int n_delayed=0, n_have=0, n_would_reject=0, n_wouldnt_use=0,
     n_inprogress=0, n_in_oldrouters=0;
@@ -2667,10 +2670,17 @@ update_consensus_router_descriptor_downloads(time_t now, int is_vote,
     networkstatus_voter_info_t *voter = smartlist_get(consensus->voters, 0);
     tor_assert(voter);
     ds = trusteddirserver_get_by_v3_auth_digest(voter->identity_digest);
-    if (ds)
-      source = &(ds->fake_status);
-    else
+    if (ds) {
+      source = router_get_consensus_status_by_id(ds->digest);
+      if (!source) {
+        /* prefer to use the address in the consensus, but fall back to
+         * the hard-coded trusted_dir_server address if we don't have a
+         * consensus or this digest isn't in our consensus. */
+        source = &ds->fake_status;
+      }
+    } else {
       log_warn(LD_DIR, "couldn't lookup source from vote?");
+    }
   }
 
   map = digestmap_new();

@@ -187,7 +187,6 @@ static int connection_reached_eof(connection_t *conn);
 static int connection_buf_read_from_socket(connection_t *conn,
                                            ssize_t *max_to_read,
                                            int *socket_error);
-static int connection_process_inbuf(connection_t *conn, int package_partial);
 static void client_check_address_changed(tor_socket_t sock);
 static void set_constrained_socket_buffers(tor_socket_t sock, int size);
 
@@ -659,7 +658,7 @@ listener_connection_new(int type, int socket_family)
   connection_init(time(NULL), TO_CONN(listener_conn), type, socket_family);
   /* Listener connections aren't accounted for with note_connection() so do
    * this explicitly so to count them. */
-  rep_hist_note_conn_opened(false, type);
+  rep_hist_note_conn_opened(false, type, socket_family);
   return listener_conn;
 }
 
@@ -1163,7 +1162,8 @@ connection_mark_for_close_internal_, (connection_t *conn,
   conn->timestamp_last_write_allowed = time(NULL);
 
   /* Note the connection close. */
-  rep_hist_note_conn_closed(conn->from_listener, conn->type);
+  rep_hist_note_conn_closed(conn->from_listener, conn->type,
+                            conn->socket_family);
 }
 
 /** Find each connection that has hold_open_until_flushed set to
@@ -1255,34 +1255,10 @@ create_unix_sockaddr(const char *listenaddress, char **readable_address,
 }
 #endif /* defined(HAVE_SYS_UN_H) || defined(RUNNING_DOXYGEN) */
 
-/**
- * A socket failed from resource exhaustion.
- *
- * Among other actions, warn that an accept or a connect has failed because
- * we're running out of TCP sockets we can use on current system.  Rate-limit
- * these warnings so that we don't spam the log. */
+/* Log a rate-limited warning about resource exhaustion */
 static void
-socket_failed_from_resource_exhaustion(void)
+warn_about_resource_exhaution(void)
 {
-  /* When we get to this point we know that a socket could not be
-   * established. However the kernel does not let us know whether the reason is
-   * because we ran out of TCP source ports, or because we exhausted all the
-   * FDs on this system, or for any other reason.
-   *
-   * For this reason, we are going to use the following heuristic: If our
-   * system supports a lot of sockets, we will assume that it's a problem of
-   * TCP port exhaustion. Otherwise, if our system does not support many
-   * sockets, we will assume that this is because of file descriptor
-   * exhaustion.
-   */
-  if (get_max_sockets() > 65535) {
-    /* TCP port exhaustion */
-    rep_hist_note_tcp_exhaustion();
-  } else {
-    /* File descriptor exhaustion */
-    rep_hist_note_overload(OVERLOAD_FD_EXHAUSTED);
-  }
-
 #define WARN_TOO_MANY_CONNS_INTERVAL (6*60*60)
   static ratelim_t last_warned = RATELIM_INIT(WARN_TOO_MANY_CONNS_INTERVAL);
   char *m;
@@ -1294,6 +1270,28 @@ socket_failed_from_resource_exhaustion(void)
     control_event_general_status(LOG_WARN, "TOO_MANY_CONNECTIONS CURRENT=%d",
                                  n_conns);
   }
+}
+
+/**
+ * A socket failed from file descriptor exhaustion.
+ *
+ * Note down file descriptor exhaustion and log a warning. */
+static inline void
+socket_failed_from_fd_exhaustion(void)
+{
+  rep_hist_note_overload(OVERLOAD_FD_EXHAUSTED);
+  warn_about_resource_exhaution();
+}
+
+/**
+ * A socket failed from TCP port exhaustion.
+ *
+ * Note down TCP port exhaustion and log a warning. */
+static inline void
+socket_failed_from_tcp_port_exhaustion(void)
+{
+  rep_hist_note_tcp_exhaustion();
+  warn_about_resource_exhaution();
 }
 
 #ifdef HAVE_SYS_UN_H
@@ -1511,7 +1509,7 @@ connection_listener_new(const struct sockaddr *listensockaddr,
     if (!SOCKET_OK(s)) {
       int e = tor_socket_errno(s);
       if (ERRNO_IS_RESOURCE_LIMIT(e)) {
-        socket_failed_from_resource_exhaustion();
+        socket_failed_from_fd_exhaustion();
         /*
          * We'll call the OOS handler at the error exit, so set the
          * exhaustion flag for it.
@@ -1637,7 +1635,7 @@ connection_listener_new(const struct sockaddr *listensockaddr,
     if (! SOCKET_OK(s)) {
       int e = tor_socket_errno(s);
       if (ERRNO_IS_RESOURCE_LIMIT(e)) {
-        socket_failed_from_resource_exhaustion();
+        socket_failed_from_fd_exhaustion();
         /*
          * We'll call the OOS handler at the error exit, so set the
          * exhaustion flag for it.
@@ -1950,7 +1948,7 @@ connection_handle_listener_read(connection_t *conn, int new_type)
       connection_check_oos(get_n_open_sockets(), 0);
       return 0;
     } else if (ERRNO_IS_RESOURCE_LIMIT(e)) {
-      socket_failed_from_resource_exhaustion();
+      socket_failed_from_fd_exhaustion();
       /* Exhaustion; tell the OOS handler */
       connection_check_oos(get_n_open_sockets(), 1);
       return 0;
@@ -2011,7 +2009,7 @@ connection_handle_listener_read(connection_t *conn, int new_type)
         log_notice(LD_APP,
                    "Denying socks connection from untrusted address %s.",
                    fmt_and_decorate_addr(&addr));
-        rep_hist_note_conn_rejected(new_type);
+        rep_hist_note_conn_rejected(new_type, conn->socket_family);
         tor_close_socket(news);
         return 0;
       }
@@ -2021,7 +2019,7 @@ connection_handle_listener_read(connection_t *conn, int new_type)
       if (dir_policy_permits_address(&addr) == 0) {
         log_notice(LD_DIRSERV,"Denying dir connection from address %s.",
                    fmt_and_decorate_addr(&addr));
-        rep_hist_note_conn_rejected(new_type);
+        rep_hist_note_conn_rejected(new_type, conn->socket_family);
         tor_close_socket(news);
         return 0;
       }
@@ -2030,7 +2028,7 @@ connection_handle_listener_read(connection_t *conn, int new_type)
       /* Assess with the connection DoS mitigation subsystem if this address
        * can open a new connection. */
       if (dos_conn_addr_get_defense_type(&addr) == DOS_CONN_DEFENSE_CLOSE) {
-        rep_hist_note_conn_rejected(new_type);
+        rep_hist_note_conn_rejected(new_type, conn->socket_family);
         tor_close_socket(news);
         return 0;
       }
@@ -2219,7 +2217,7 @@ connection_connect_sockaddr,(connection_t *conn,
      */
     *socket_error = tor_socket_errno(s);
     if (ERRNO_IS_RESOURCE_LIMIT(*socket_error)) {
-      socket_failed_from_resource_exhaustion();
+      socket_failed_from_fd_exhaustion();
       connection_check_oos(get_n_open_sockets(), 1);
     } else {
       log_warn(LD_NET,"Error creating network socket: %s",
@@ -2234,10 +2232,34 @@ connection_connect_sockaddr,(connection_t *conn,
              tor_socket_strerror(errno));
   }
 
+  /* From ip(7): Inform the kernel to not reserve an ephemeral port when using
+   * bind(2) with a port number of 0. The port will later be automatically
+   * chosen at connect(2) time, in a way that allows sharing a source port as
+   * long as the 4-tuple is unique.
+   *
+   * This is needed for relays using OutboundBindAddresses because the port
+   * value in the bind address is set to 0. */
+#ifdef IP_BIND_ADDRESS_NO_PORT
+  static int try_ip_bind_address_no_port = 1;
+  if (bindaddr && try_ip_bind_address_no_port &&
+      setsockopt(s, SOL_IP, IP_BIND_ADDRESS_NO_PORT, &(int){1}, sizeof(int))) {
+    if (errno == EINVAL) {
+      log_notice(LD_NET, "Tor was built with support for "
+                         "IP_BIND_ADDRESS_NO_PORT, but the current kernel "
+                         "doesn't support it. This might cause Tor to run out "
+                         "of ephemeral ports more quickly.");
+      try_ip_bind_address_no_port = 0;
+    } else {
+      log_warn(LD_NET, "Error setting IP_BIND_ADDRESS_NO_PORT on new "
+                       "connection: %s", tor_socket_strerror(errno));
+    }
+  }
+#endif
+
   if (bindaddr && bind(s, bindaddr, bindaddr_len) < 0) {
     *socket_error = tor_socket_errno(s);
     if (ERRNO_IS_EADDRINUSE(*socket_error)) {
-      socket_failed_from_resource_exhaustion();
+      socket_failed_from_tcp_port_exhaustion();
       connection_check_oos(get_n_open_sockets(), 1);
     } else {
       log_warn(LD_NET,"Error binding network socket: %s",
@@ -3721,9 +3743,16 @@ void
 connection_read_bw_exhausted(connection_t *conn, bool is_global_bw)
 {
   (void)is_global_bw;
-  conn->read_blocked_on_bw = 1;
-  connection_stop_reading(conn);
-  reenable_blocked_connection_schedule();
+  // Double-calls to stop-reading are correlated with stalling for
+  // ssh uploads. Might as well prevent this from happening,
+  // especially the read_blocked_on_bw flag. That was clearly getting
+  // set when it should not be, during an already-blocked XOFF
+  // condition.
+  if (!CONN_IS_EDGE(conn) || !TO_EDGE_CONN(conn)->xoff_received) {
+    conn->read_blocked_on_bw = 1;
+    connection_stop_reading(conn);
+    reenable_blocked_connection_schedule();
+  }
 }
 
 /**
@@ -3900,10 +3929,17 @@ reenable_blocked_connections_cb(mainloop_event_t *ev, void *arg)
   (void)ev;
   (void)arg;
   SMARTLIST_FOREACH_BEGIN(get_connection_array(), connection_t *, conn) {
-    if (conn->read_blocked_on_bw == 1) {
+    /* For conflux, we noticed logs of connection_start_reading() called
+     * multiple times while we were blocked from a previous XOFF, and this
+     * was log was correlated with stalls during ssh uploads. So we added
+     * this additional check, to avoid connection_start_reading() without
+     * getting an XON. The most important piece is always allowing
+     * the read_blocked_on_bw to get cleared, either way. */
+    if (conn->read_blocked_on_bw == 1 &&
+        (!CONN_IS_EDGE(conn) || !TO_EDGE_CONN(conn)->xoff_received)) {
       connection_start_reading(conn);
-      conn->read_blocked_on_bw = 0;
     }
+    conn->read_blocked_on_bw = 0;
     if (conn->write_blocked_on_bw == 1) {
       connection_start_writing(conn);
       conn->write_blocked_on_bw = 0;
@@ -5175,7 +5211,7 @@ set_constrained_socket_buffers(tor_socket_t sock, int size)
  * connection_*_process_inbuf() function. It also passes in
  * package_partial if wanted.
  */
-static int
+int
 connection_process_inbuf(connection_t *conn, int package_partial)
 {
   tor_assert(conn);

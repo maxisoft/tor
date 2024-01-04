@@ -37,6 +37,7 @@ ALL_BUGS_ARE_FATAL="${ALL_BUGS_ARE_FATAL:-no}"
 DISABLE_DIRAUTH="${DISABLE_DIRAUTH:-no}"
 DISABLE_RELAY="${DISABLE_RELAY:-no}"
 NSS="${NSS:-no}"
+GPL="${GPL:-no}"
 
 # Options for which tests to run.   All should be yes/no.
 CHECK="${CHECK:-yes}"
@@ -200,6 +201,7 @@ yes_or_no ALL_BUGS_ARE_FATAL
 yes_or_no DISABLE_DIRAUTH
 yes_or_no DISABLE_RELAY
 yes_or_no NSS
+yes_or_no GPL
 
 yes_or_no RUN_STAGE_CONFIGURE
 yes_or_no RUN_STAGE_BUILD
@@ -262,6 +264,9 @@ fi
 if [[ "$NSS" == "yes" ]]; then
     configure_options+=("--enable-nss")
 fi
+if [[ "$GPL" == "yes" ]]; then
+    configure_options+=("--enable-gpl")
+fi
 
 #############################################################################
 # Tell the user about our versions of different tools and packages.
@@ -293,10 +298,6 @@ TOR_VER_AT_LEAST_044=no
 # These are the currently supported Tor versions; no need to work with anything
 # ancient in this script.
 case "$TOR_VERSION" in
-    0.4.5.*)
-        TOR_VER_AT_LEAST_043=yes
-        TOR_VER_AT_LEAST_044=yes
-        ;;
     0.4.7.*)
         TOR_VER_AT_LEAST_043=yes
         TOR_VER_AT_LEAST_044=yes
@@ -371,7 +372,6 @@ if [[ "$RUN_STAGE_BUILD" = "yes" ]] ; then
             hooray "Distcheck was successful. Nothing further will be done."
             # We have to exit early here, since we can't do any other tests.
             cp tor-*.tar.gz "${CI_SRCDIR}"/artifacts
-            exit 0
         else
             error "Diagnostics:"
             runcmd make show-distdir-testlog || true
@@ -379,6 +379,7 @@ if [[ "$RUN_STAGE_BUILD" = "yes" ]] ; then
             die "Unable to continue."
         fi
         end_section Distcheck
+        exit 0
     fi
 fi
 

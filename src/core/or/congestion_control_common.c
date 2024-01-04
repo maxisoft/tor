@@ -23,6 +23,8 @@
 #include "core/or/congestion_control_nola.h"
 #include "core/or/congestion_control_westwood.h"
 #include "core/or/congestion_control_st.h"
+#include "core/or/conflux.h"
+#include "core/or/conflux_util.h"
 #include "core/or/trace_probes_cc.h"
 #include "lib/time/compat_time.h"
 #include "feature/nodelist/networkstatus.h"
@@ -91,6 +93,12 @@ static bool congestion_control_update_circuit_bdp(congestion_control_t *,
 /* For unit tests */
 void congestion_control_set_cc_enabled(void);
 
+/* Number of times the RTT value was reset. For MetricsPort. */
+static uint64_t num_rtt_reset;
+
+/* Number of times the clock was stalled. For MetricsPort. */
+static uint64_t num_clock_stalls;
+
 /* Consensus parameters cached. The non static ones are extern. */
 static uint32_t cwnd_max = CWND_MAX_DFLT;
 int32_t cell_queue_high = CELL_QUEUE_HIGH_DFLT;
@@ -121,10 +129,27 @@ static uint8_t n_ewma_ss;
 static uint8_t bwe_sendme_min;
 
 /**
- * Percentage of the current RTT to use when reseting the minimum RTT
+ * Percentage of the current RTT to use when resetting the minimum RTT
  * for a circuit. (RTT is reset when the cwnd hits cwnd_min).
  */
 static uint8_t rtt_reset_pct;
+
+/** Metric to count the number of congestion control circuits **/
+uint64_t cc_stats_circs_created = 0;
+
+/** Return the number of RTT reset that have been done. */
+uint64_t
+congestion_control_get_num_rtt_reset(void)
+{
+  return num_rtt_reset;
+}
+
+/** Return the number of clock stalls that have been done. */
+uint64_t
+congestion_control_get_num_clock_stalls(void)
+{
+  return num_clock_stalls;
+}
 
 /**
  * Update global congestion control related consensus parameter values,
@@ -402,6 +427,8 @@ congestion_control_new(const circuit_params_t *params, cc_path_t path)
 
   congestion_control_init(cc, params, path);
 
+  cc_stats_circs_created++;
+
   return cc;
 }
 
@@ -677,7 +704,7 @@ circuit_has_active_streams(const circuit_t *circ,
     if (conn->base_.marked_for_close)
       continue;
 
-    if (!layer_hint || conn->cpath_layer == layer_hint) {
+    if (edge_uses_cpath(conn, layer_hint)) {
       if (connection_get_inbuf_len(TO_CONN(conn)) > 0) {
         log_info(LD_CIRC, "CC: More in edge inbuf...");
         return 1;
@@ -862,6 +889,7 @@ congestion_control_update_circuit_rtt(congestion_control_t *cc,
 
   /* Do not update RTT at all if it looks fishy */
   if (time_delta_stalled_or_jumped(cc, cc->ewma_rtt_usec, rtt)) {
+    num_clock_stalls++; /* Accounting */
     return 0;
   }
 
@@ -876,7 +904,7 @@ congestion_control_update_circuit_rtt(congestion_control_t *cc,
   if (cc->min_rtt_usec == 0) {
     // If we do not have a min_rtt yet, use current ewma
     cc->min_rtt_usec = cc->ewma_rtt_usec;
-  } else if (cc->cwnd == cc->cwnd_min) {
+  } else if (cc->cwnd == cc->cwnd_min && !cc->in_slow_start) {
     // Raise min rtt if cwnd hit cwnd_min. This gets us out of a wedge state
     // if we hit cwnd_min due to an abnormally low rtt.
     uint64_t new_rtt = percent_max_mix(cc->ewma_rtt_usec, cc->min_rtt_usec,
@@ -888,6 +916,7 @@ congestion_control_update_circuit_rtt(congestion_control_t *cc,
             cc->min_rtt_usec/1000, new_rtt/1000);
 
     cc->min_rtt_usec = new_rtt;
+    num_rtt_reset++; /* Accounting */
   } else if (cc->ewma_rtt_usec < cc->min_rtt_usec) {
     // Using the EWMA for min instead of current RTT helps average out
     // effects from other conns
@@ -926,11 +955,11 @@ congestion_control_update_circuit_bdp(congestion_control_t *cc,
   if (CIRCUIT_IS_ORIGIN(circ)) {
     /* origin circs use n_chan */
     chan_q = circ->n_chan_cells.n;
-    blocked_on_chan = circ->streams_blocked_on_n_chan;
+    blocked_on_chan = circ->circuit_blocked_on_n_chan;
   } else {
     /* Both onion services and exits use or_circuit and p_chan */
     chan_q = CONST_TO_OR_CIRCUIT(circ)->p_chan_cells.n;
-    blocked_on_chan = circ->streams_blocked_on_p_chan;
+    blocked_on_chan = circ->circuit_blocked_on_p_chan;
   }
 
   /* If we have no EWMA RTT, it is because monotime has been stalled
@@ -1161,7 +1190,7 @@ congestion_control_update_circuit_bdp(congestion_control_t *cc,
  */
 int
 congestion_control_dispatch_cc_alg(congestion_control_t *cc,
-                                   const circuit_t *circ,
+                                   circuit_t *circ,
                                    const crypt_path_t *layer_hint)
 {
   int ret = -END_CIRC_REASON_INTERNAL;
@@ -1190,6 +1219,10 @@ congestion_control_dispatch_cc_alg(congestion_control_t *cc,
            cc->cwnd, cwnd_max);
     cc->cwnd = cwnd_max;
   }
+
+  /* If we have a non-zero RTT measurement, update conflux. */
+  if (circ->conflux && cc->ewma_rtt_usec)
+    conflux_update_rtt(circ->conflux, circ, cc->ewma_rtt_usec);
 
   return ret;
 }

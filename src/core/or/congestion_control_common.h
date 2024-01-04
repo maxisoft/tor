@@ -46,7 +46,7 @@ congestion_control_t *congestion_control_new(
                                     cc_path_t path);
 
 int congestion_control_dispatch_cc_alg(congestion_control_t *cc,
-                                       const circuit_t *circ,
+                                       circuit_t *circ,
                                        const crypt_path_t *layer_hint);
 
 void congestion_control_note_cell_sent(congestion_control_t *cc,
@@ -81,6 +81,11 @@ int congestion_control_parse_ext_response(const uint8_t *msg,
                                           circuit_params_t *params_out);
 bool congestion_control_validate_sendme_increment(uint8_t sendme_inc);
 char *congestion_control_get_control_port_fields(const origin_circuit_t *);
+
+uint64_t congestion_control_get_num_rtt_reset(void);
+uint64_t congestion_control_get_num_clock_stalls(void);
+
+extern uint64_t cc_stats_circs_created;
 
 /* Ugh, C.. these are private. Use the getter instead, when
  * external to the congestion control code. */
